@@ -97,7 +97,7 @@ form.addEventListener("submit", async event => {
 
 featureSelect.addEventListener("change", updateModel);
 document.querySelector("#example-fiction").addEventListener("click", () => {
-  urlInput.value = "https://books.toscrape.com/catalogue/private-paris-private-10_958/index.html";
+  urlInput.value = "https://books.toscrape.com/catalogue/thirst_946/index.html";
   urlInput.focus();
 });
 document.querySelector("#example-nonfiction").addEventListener("click", () => {
