@@ -16,7 +16,6 @@ function updateModel() {
   document.querySelector("#model-name").textContent = selected.model;
   document.querySelector("#model-accuracy").textContent = `${(selected.accuracy * 100).toFixed(2)}%`;
   document.querySelector("#model-f1").textContent = selected.macro_f1.toFixed(4);
-  document.querySelector("#selection-note").textContent = selected.selection_note;
   document.querySelector("#model-card").hidden = false;
 }
 

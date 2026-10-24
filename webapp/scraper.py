@@ -43,9 +43,13 @@ def parse_book(html, url):
         raise BookError("This page does not contain a book title.")
 
     title = clean_title(heading.get_text())
-    description_heading = soup.find("div", id="product_description")
-    paragraph = description_heading.find_next("p") if description_heading else None
-    description = clean_description(paragraph.get_text() if paragraph else "")
+    # The same description extraction used in 01_scraping.ipynb.
+    book_description = soup.find("div", id="product_description")
+    if book_description is not None and book_description.find_next("p") is not None:
+        description = book_description.find_next("p").text
+    else:
+        description = ""
+    description = clean_description(description)
 
     # Category is displayed for comparison only. It never enters the model.
     breadcrumb = soup.find("ul", class_="breadcrumb")
@@ -72,10 +76,11 @@ def parse_book(html, url):
 
 
 def scrape_book(url):
-    url = validate_book_url(url)
+    book_description_link = validate_book_url(url)
     try:
         # Redirects are disabled so a supplied URL cannot redirect to another host.
-        with requests.get(url, timeout=(5, 15), allow_redirects=False, stream=True) as response:
+        response = requests.get(book_description_link, timeout=(5, 15), allow_redirects=False)
+        with response:
             if response.status_code == 404:
                 raise BookError("Book not found. Check the link and try again.", 404)
             if 300 <= response.status_code < 400:
@@ -84,13 +89,11 @@ def scrape_book(url):
             content_type = response.headers.get("content-type", "")
             if "text/html" not in content_type.lower():
                 raise BookError("The book website returned an unexpected page type.", 502)
-            content = bytearray()
-            for chunk in response.iter_content(chunk_size=16384):
-                content.extend(chunk)
-                if len(content) > 2_000_000:
-                    raise BookError("The book page is too large to process.", 502)
+            content = response.content
+            if len(content) > 2_000_000:
+                raise BookError("The book page is too large to process.", 502)
     except requests.Timeout as error:
         raise BookError("The book website took too long. Please try again.", 504) from error
     except requests.RequestException as error:
         raise BookError("Could not load the book website. Please try again.", 502) from error
-    return parse_book(bytes(content), url)
+    return parse_book(content, book_description_link)

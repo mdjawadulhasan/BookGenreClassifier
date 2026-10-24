@@ -1,4 +1,3 @@
-import json
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -6,7 +5,11 @@ import pandas as pd
 import pytest
 import requests
 from fastapi.testclient import TestClient
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics import accuracy_score, f1_score
+from sklearn.model_selection import train_test_split
+from sklearn.naive_bayes import MultinomialNB
 
 import main
 import scraper
@@ -35,7 +38,7 @@ def mock_response(monkeypatch, status=200, content=HTML):
     response = MagicMock()
     response.status_code = status
     response.headers = {"content-type": "text/html; charset=utf-8"}
-    response.iter_content.return_value = [content]
+    response.content = content
     if status >= 400:
         response.raise_for_status.side_effect = requests.HTTPError()
     response.__enter__.return_value = response
@@ -50,11 +53,10 @@ def test_static_frontend_and_model_options(client):
     assert client.get("/static/style.css").status_code == 200
     assert client.get("/health").json() == {"status": "ok", "models_loaded": 3}
     data = client.get("/api/models").json()
-    assert (data["training_rows"], data["test_rows"]) == (138, 35)
     assert [model["model"] for model in data["models"]] == [
-        "Naive Bayes",
-        "Random Forest",
-        "Random Forest",
+        "MultinomialNB",
+        "RandomForestClassifier",
+        "RandomForestClassifier",
     ]
     assert "train_urls" not in data
 
@@ -70,27 +72,35 @@ def test_scrape_to_prediction(client, monkeypatch, feature):
     assert data["book"]["title"] == "Private Paris (Private #10)"
     assert data["book"]["description"] == "A story of family, love and adventure."
     assert data["book"]["site_category"] == "Fiction"
-    assert data["dataset_split"] == "training"
-    assert "not an independent test" in data["warnings"][0]
+    assert "dataset_split" not in data
+    assert "warnings" not in data
     assert get.call_args.kwargs["allow_redirects"] is False
     assert get.call_args.kwargs["timeout"] == (5, 15)
 
 
-def test_original_test_book_membership(client, monkeypatch):
-    mock_response(monkeypatch)
-    url = main.app.state.metadata["test_urls"][0]
-    result = client.post("/api/predict", json={"book_url": url, "feature": "title"}).json()
-    assert result["dataset_split"] == "test"
-
-
-def test_unknown_words_and_out_of_scope_category(client, monkeypatch):
+def test_unknown_words_still_use_the_saved_model(client, monkeypatch):
     book = parse_book(HTML, "https://books.toscrape.com/catalogue/new-book_9999/index.html")
     book.update(title="zzzzqqqqxxxx", site_category="Poetry")
     monkeypatch.setattr(main, "scrape_book", lambda url: book)
     data = client.post("/api/predict", json={"book_url": BOOK_URL, "feature": "title"}).json()
-    assert data["dataset_split"] == "outside_dataset"
-    assert len(data["warnings"]) == 3
-    assert "trained vocabulary" in data["warnings"][-1]
+    bundle = main.app.state.models["title"]
+    features = bundle["vectorizer"].transform([book["title"]])
+    assert features.nnz == 0
+    assert data["prediction"] == bundle["model"].predict(features)[0]
+
+
+def test_startup_and_predictions_do_not_train(monkeypatch):
+    def no_training(*args, **kwargs):
+        raise AssertionError("The web app must not train models or fit TF-IDF.")
+
+    for estimator in [MultinomialNB, RandomForestClassifier, TfidfVectorizer]:
+        monkeypatch.setattr(estimator, "fit", no_training)
+    monkeypatch.setattr(TfidfVectorizer, "fit_transform", no_training)
+    mock_response(monkeypatch)
+    with TestClient(main.app) as client:
+        for feature in main.FEATURES:
+            response = client.post("/api/predict", json={"book_url": BOOK_URL, "feature": feature})
+            assert response.status_code == 200
 
 
 def test_category_is_not_used_for_prediction(client, monkeypatch):
@@ -205,10 +215,9 @@ def test_cleaning_matches_saved_course_data():
 
 def test_exported_models_reproduce_notebook_test_scores(client):
     df = pd.read_csv(APP_FOLDER.parent / "data/cleaned/books_cleaned.csv").set_index("book_url")
-    metadata = json.loads((APP_FOLDER / "artifacts/metadata.json").read_text())
-    test = df.loc[metadata["test_urls"]]
-    assert set(metadata["train_urls"]).isdisjoint(metadata["test_urls"])
-    for info in metadata["models"]:
+    _, test = train_test_split(df, test_size=0.2, random_state=42, stratify=df["category"])
+    expected_accuracy = {"title": 23 / 35, "description": 29 / 35, "title_description": 30 / 35}
+    for info in client.get("/api/models").json()["models"]:
         feature = info["feature"]
         bundle = main.app.state.models[feature]
         texts = [
@@ -216,6 +225,7 @@ def test_exported_models_reproduce_notebook_test_scores(client):
         ]
         predicted = bundle["model"].predict(bundle["vectorizer"].transform(texts))
         assert accuracy_score(test["category"], predicted) == info["accuracy"]
+        assert info["accuracy"] == expected_accuracy[feature]
         assert f1_score(test["category"], predicted, average="macro") == info["macro_f1"]
         vocabulary = bundle["vectorizer"].vocabulary_
         assert len(vocabulary) == (58 if feature == "title" else 500)

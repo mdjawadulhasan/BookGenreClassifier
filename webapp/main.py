@@ -1,6 +1,5 @@
 """FastAPI backend and the small, same-origin frontend."""
 
-import json
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Literal
@@ -15,22 +14,22 @@ from scraper import BookError, scrape_book
 from text_features import prepare_text
 
 APP_FOLDER = Path(__file__).resolve().parent
+FEATURES = {
+    "title": "Title only",
+    "description": "Description only",
+    "title_description": "Title + description",
+}
 
 
 @asynccontextmanager
 async def lifespan(app):
     artifact_folder = APP_FOLDER / "artifacts"
-    metadata_file = artifact_folder / "metadata.json"
-    if not metadata_file.exists():
-        raise RuntimeError("Models are missing. Run: python train_models.py")
-    app.state.metadata = json.loads(metadata_file.read_text(encoding="utf-8"))
     app.state.models = {}
-    for model_info in app.state.metadata["models"]:
-        feature = model_info["feature"]
-        # Only load artifacts generated locally by train_models.py.
-        app.state.models[feature] = joblib.load(artifact_folder / f"{feature}.joblib")
-    app.state.train_urls = set(app.state.metadata["train_urls"])
-    app.state.test_urls = set(app.state.metadata["test_urls"])
+    for feature in FEATURES:
+        model_file = artifact_folder / f"{feature}.joblib"
+        if not model_file.exists():
+            raise RuntimeError(f"Missing {model_file.name}. Run the export cell in its notebook.")
+        app.state.models[feature] = joblib.load(model_file)
     yield
 
 
@@ -55,13 +54,19 @@ def health():
 
 @app.get("/api/models")
 def list_models():
-    metadata = app.state.metadata
-    return {
-        "models": metadata["models"],
-        "training_rows": metadata["training_rows"],
-        "test_rows": metadata["test_rows"],
-        "selection_metric": metadata["selection_metric"],
-    }
+    options = []
+    for feature, label in FEATURES.items():
+        bundle = app.state.models[feature]
+        options.append(
+            {
+                "feature": feature,
+                "label": label,
+                "model": bundle["model"].__class__.__name__,
+                "accuracy": bundle["accuracy"],
+                "macro_f1": bundle["macro_f1"],
+            }
+        )
+    return {"models": options}
 
 
 @app.post("/api/predict")
@@ -78,40 +83,9 @@ def predict(request: PredictionRequest):
     bundle = app.state.models[request.feature]
     features = bundle["vectorizer"].transform([text])
     prediction = str(bundle["model"].predict(features)[0])
-    model_info = next(
-        info for info in app.state.metadata["models"] if info["feature"] == request.feature
-    )
-
-    warnings = []
-    if book["book_url"] in app.state.train_urls:
-        dataset_split = "training"
-        warnings.append(
-            "This book was used to train the model. Its prediction is not an independent test."
-        )
-    elif book["book_url"] in app.state.test_urls:
-        dataset_split = "test"
-        warnings.append("This book belongs to the original test set used in the reported results.")
-    else:
-        dataset_split = "outside_dataset"
-        warnings.append(
-            "This book was not in the cleaned project dataset. The reported scores do not measure performance on it."
-        )
-    if book["site_category"] not in {"Fiction", "Nonfiction"}:
-        warnings.append(
-            "The model was trained only on the website's Fiction and Nonfiction sections. This book is outside those sections."
-        )
-    if features.nnz == 0:
-        warnings.append(
-            "None of this text's words matched the trained vocabulary. Treat this prediction cautiously."
-        )
-
     return {
         "book": book,
         "prediction": prediction,
         "feature": request.feature,
-        "model": model_info["model"],
-        "test_accuracy": model_info["accuracy"],
-        "macro_f1": model_info["macro_f1"],
-        "dataset_split": dataset_split,
-        "warnings": warnings,
+        "model": bundle["model"].__class__.__name__,
     }
